@@ -1448,9 +1448,42 @@ def registry(request: Request, date_value: str = ""):
 
     chosen = date_value or now_bkk().date().isoformat()
     try:
-        rows, _ = read_records()
-        rows = [r for r in rows if str(r.get("created_at_bkk", "")).startswith(chosen)]
-        rows.sort(key=lambda x: x.get("created_at_bkk", ""))
+        all_rows, _ = read_records()
+        day_rows = [r for r in all_rows if str(r.get("created_at_bkk", "")).startswith(chosen)]
+
+        # Dashboard shows one line per patient, while every original record remains
+        # untouched in the CSV.  Citizen ID is the primary identity key.
+        # The newest submission for that patient is displayed.
+        patient_groups = {}
+        for r in day_rows:
+            cid = digits(r.get("citizen_id", ""))
+            sid = str(r.get("student_id", "") or "").strip().lower()
+            dob = str(r.get("birth_date", "") or "").strip()
+            name = " ".join(
+                str(x or "").strip().lower()
+                for x in (r.get("first_name", ""), r.get("last_name", ""))
+            ).strip()
+
+            # Citizen ID is available for normal records in this app.
+            # Fallbacks make older/legacy CSV rows safe to group as well.
+            if cid:
+                patient_key = ("cid", cid)
+            elif sid:
+                patient_key = ("sid", sid)
+            else:
+                patient_key = ("name_dob", name, dob)
+
+            patient_groups.setdefault(patient_key, []).append(r)
+
+        rows = []
+        for group in patient_groups.values():
+            group.sort(key=lambda x: x.get("created_at_bkk", ""))
+            latest = dict(group[-1])
+            latest["_record_count"] = len(group)
+            rows.append(latest)
+
+        # Newest patient encounter first on the dashboard.
+        rows.sort(key=lambda x: x.get("created_at_bkk", ""), reverse=True)
     except requests.HTTPError as error:
         rows = []
         error_html = f'<div class="alert err">อ่านข้อมูลไม่สำเร็จ: {esc(github_error_text(error))}</div>'
@@ -1462,24 +1495,31 @@ def registry(request: Request, date_value: str = ""):
 
     table_rows = ""
     for r in rows:
+        record_count = int(r.get("_record_count", 1) or 1)
+        repeat_html = (
+            f'<span class="small" style="white-space:nowrap">{record_count} records</span>'
+            if record_count > 1
+            else '<span class="small">1</span>'
+        )
         table_rows += f"""<tr>
 <td>{esc(format_datetime(r.get('created_at_bkk',''))[-5:])}</td>
 <td>{esc(r.get('first_name',''))} {esc(r.get('last_name',''))}</td>
+<td>{repeat_html}</td>
 <td>{esc(r.get('patient_type',''))}</td>
 <td>{esc(r.get('student_id',''))}</td>
 <td>{esc(r.get('hn',''))}</td>
 <td>{esc(r.get('chief_complaint','')[:70])}</td>
 <td>{triage_badge_html(r)}</td>
-<td><a href="/registry/{esc(r.get('record_id',''))}">เปิด</a></td>
+<td><a href="/registry/{esc(r.get('record_id',''))}">เปิดล่าสุด</a></td>
 </tr>"""
     if not table_rows:
-        table_rows = '<tr><td colspan="8" class="small">ไม่พบข้อมูลในวันที่เลือก</td></tr>'
+        table_rows = '<tr><td colspan="9" class="small">ไม่พบข้อมูลในวันที่เลือก</td></tr>'
 
     body = f"""
 <div class="wrap">
   <div class="card no-print">
     <div class="actions" style="justify-content:space-between">
-      <div><h1>เวชระเบียน OPD</h1><p class="note">รายการผู้รับบริการตามวันบันทึก</p></div>
+      <div><h1>เวชระเบียน OPD</h1><p class="note">แสดงคนไข้ 1 คนต่อ 1 แถว โดยใช้ข้อมูลล่าสุดของวันที่เลือก (Records เดิมยังเก็บครบ)</p></div>
       <form method="post" action="/registry/logout"><button class="btn light">ออกจากระบบ</button></form>
     </div>
     {error_html}
@@ -1487,7 +1527,7 @@ def registry(request: Request, date_value: str = ""):
       <label class="field" style="max-width:280px">วันที่<input type="date" name="date_value" value="{esc(chosen)}" onchange="this.form.submit()"></label>
     </form>
     <div style="height:12px"></div>
-    <table><thead><tr><th>เวลา</th><th>ชื่อ-นามสกุล</th><th>สถานะ</th><th>รหัสนิสิต</th><th>HN</th><th>อาการนำ</th><th>AI สี</th><th></th></tr></thead>
+    <table><thead><tr><th>ล่าสุด</th><th>ชื่อ-นามสกุล</th><th>Records</th><th>สถานะ</th><th>รหัสนิสิต</th><th>HN</th><th>อาการนำล่าสุด</th><th>AI สี</th><th></th></tr></thead>
     <tbody>{table_rows}</tbody></table>
   </div>
 </div>"""
